@@ -6,11 +6,17 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import io
     import re
+    import urllib.request
 
     import altair as alt
     import marimo as mo
     import pandas as pd
+
+    def _read_csv(path):
+        with urllib.request.urlopen(str(path)) as resp:
+            return pd.read_csv(io.BytesIO(resp.read()))
 
     # Load all load_factor CSV files
     bench_dir = mo.notebook_location() / "public" / "bench_results"
@@ -19,7 +25,7 @@ def _():
     dfs = []
     for lf in load_factors:
         f = bench_dir / f"load_factor_{lf}.csv"
-        _df = pd.read_csv(str(f), compression=None)
+        _df = _read_csv(f)
         _df["load_factor"] = lf
         dfs.append(_df)
 
@@ -35,7 +41,7 @@ def _():
     for lf in load_factors:
         for res in reserves:
             f = bench_dir / f"regular_bench_{lf}_{res}.csv"
-            _df = pd.read_csv(str(f), compression=None)
+            _df = _read_csv(f)
             _df["load_factor"] = lf
             _df["reserve"] = res
             reg_dfs.append(_df)
@@ -70,11 +76,16 @@ def _(lf_bench_df, mo, reg_bench_df):
         value="No reserve(2*N)",
         label="Upfront reserve",
     )
-    return datatype_dropdown, lf_dropdown, reserve_radio
+    lf_y_scale_radio = mo.ui.radio(
+        options={"Fixed": "fixed", "Independent": "independent"},
+        value="Fixed",
+        label="Y-axis scaling",
+    )
+    return datatype_dropdown, lf_dropdown, lf_y_scale_radio, reserve_radio
 
 
 @app.cell
-def _(alt, lf_bench_df, lf_dropdown, mo):
+def _(alt, lf_bench_df, lf_dropdown, lf_y_scale_radio, mo):
     _df = lf_bench_df[lf_bench_df["load_factor"] == lf_dropdown.value].copy()
 
     _impl_colors = {
@@ -91,9 +102,10 @@ def _(alt, lf_bench_df, lf_dropdown, mo):
     _containers = [c for c in _container_order if c in _df["Container"].values]
     _workloads = sorted(_df["Workload"].unique())
 
+    _fixed = lf_y_scale_radio.value == "fixed"
     _y_min = _df["Mean (ns)"].min()
     _y_max = _df["Mean (ns)"].max()
-    _y_scale = alt.Scale(domain=[_y_min * 0.95, _y_max * 1.05])
+    _global_y_scale = alt.Scale(domain=[_y_min * 0.95, _y_max * 1.05])
 
     _rows = []
     for _container in _containers:
@@ -102,12 +114,15 @@ def _(alt, lf_bench_df, lf_dropdown, mo):
 
         for _workload in _workloads:
             _subset = _container_data[_container_data["Workload"] == _workload]
+            _y_enc = alt.Y("Mean (ns):Q", title="Mean (ns/op)", axis=alt.Axis(labelExpr="datum.value + ' ns'"))
+            if _fixed:
+                _y_enc = _y_enc.scale(_global_y_scale)
             _chart = (
                 alt.Chart(_subset)
                 .mark_line(point=True, strokeWidth=1.5, opacity=0.8)
                 .encode(
                     x=alt.X("N:Q", title="Size of container"),
-                    y=alt.Y("Mean (ns):Q", scale=_y_scale, title="Mean (ns/op)", axis=alt.Axis(labelExpr="datum.value + ' ns'")),
+                    y=_y_enc,
                     color=alt.Color("Impl:N", scale=_color_scale, title="Implementation"),
                     tooltip=["Impl:N", "N:Q", "Mean (ns):Q"],
                 )
@@ -129,7 +144,7 @@ def _(alt, lf_bench_df, lf_dropdown, mo):
             )
         )
     )
-    lf_tab = mo.vstack([lf_dropdown, _chart_grid])
+    lf_tab = mo.vstack([mo.hstack([lf_dropdown, lf_y_scale_radio], justify="start"), _chart_grid])
     return (lf_tab,)
 
 
