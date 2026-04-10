@@ -84,7 +84,12 @@ def _(lf_bench_df, mo, reg_bench_df):
         value="Fixed",
         label="Y-axis scaling",
     )
-    return datatype_dropdown, lf_dropdown, lf_y_scale_radio, reserve_radio
+    sim_scale_radio = mo.ui.radio(
+        options={"Absolute": "absolute", "Relative to lf=0.66": "relative"},
+        value="Absolute",
+        label="Scale",
+    )
+    return datatype_dropdown, lf_dropdown, lf_y_scale_radio, reserve_radio, sim_scale_radio
 
 
 @app.cell
@@ -361,7 +366,9 @@ def _(mo):
 
 
 @app.cell
-def _(alt, mo, sim_avg_df, sim_df):
+def _(alt, mo, sim_avg_df, sim_df, sim_scale_radio):
+    import pandas as _pd2
+
     _melted = sim_avg_df.melt(
         id_vars=["benchmark", "load_factor"],
         value_vars=["sim_mean_ms", "sim_p99_ms"],
@@ -373,24 +380,42 @@ def _(alt, mo, sim_avg_df, sim_df):
         "sim_p99_ms": "99th Pct",
     })
 
-    def _make_chart(bmarks, title, subtitle):
+    _relative = sim_scale_radio.value == "relative"
+
+    def _make_chart(bmarks, title, subtitle, ref_bmark):
         if isinstance(bmarks, str):
             bmarks = [bmarks]
-        return (
-            alt.Chart(_melted[_melted["benchmark"].isin(bmarks)])
+        _data = _melted[_melted["benchmark"].isin(bmarks)].copy()
+        if _relative:
+            _ref = _melted[
+                (_melted["benchmark"] == ref_bmark) & (_melted["load_factor"] == "0.66")
+            ].set_index("metric")["ms"]
+            _data["ms"] = _data.apply(lambda r: r["ms"] / _ref[r["metric"]], axis=1)
+            _y = alt.Y("ms:Q", title="vs lf=0.66", axis=alt.Axis(labelExpr="datum.value + 'x'"))
+        else:
+            _y = alt.Y("ms:Q", title="Frame Time", axis=alt.Axis(labelExpr="datum.value + ' ms'"))
+
+        _bars = (
+            alt.Chart(_data)
             .mark_bar(opacity=0.8)
             .encode(
                 x=alt.X("metric:N", title=None, axis=alt.Axis(labelAngle=0)),
-                y=alt.Y("ms:Q", title="Frame Time", axis=alt.Axis(labelExpr="datum.value + ' ms'")),
+                y=_y,
                 color=alt.Color("load_factor:N", title="Load Factor"),
                 xOffset="load_factor:N",
-                tooltip=["load_factor:N", "metric:N", alt.Tooltip("ms:Q", format=".2f")],
+                tooltip=["load_factor:N", "metric:N", alt.Tooltip("ms:Q", format=".3f")],
             )
-            .properties(
-                width=300,
-                height=300,
-                title=alt.TitleParams(title, fontSize=15, subtitle=subtitle),
+        )
+        _layers = [_bars]
+        if _relative:
+            _layers.append(
+                alt.Chart(_pd2.DataFrame({"y": [1.0]}))
+                .mark_rule(color="black", strokeDash=[4, 2])
+                .encode(y="y:Q")
             )
+        return (
+            alt.layer(*_layers)
+            .properties(width=300, height=300, title=alt.TitleParams(title, fontSize=15, subtitle=subtitle))
         )
 
     _chart = mo.hstack([
@@ -398,16 +423,19 @@ def _(alt, mo, sim_avg_df, sim_df):
             ["fightertest", "fightertest_std"],
             "fightertest",
             "luarules fightertest corak armpw 650 10 2040",
+            ref_bmark="fightertest",
         )),
         mo.ui.altair_chart(_make_chart(
             ["pathfinding", "pathfinding_std"],
             "fightertest pathfinding",
             "luarules fightertest armcv armck 11000 1 12000",
+            ref_bmark="pathfinding",
         )),
         mo.ui.altair_chart(_make_chart(
             "collision",
             "fightertest collision",
             "luarules fightertest corak armpw 650 10 2040",
+            ref_bmark="collision",
         )),
     ], justify="start")
 
@@ -417,6 +445,7 @@ def _(alt, mo, sim_avg_df, sim_df):
 
     sim_tab = mo.vstack([
         mo.md("## Sim Frame Timing"),
+        sim_scale_radio,
         _chart,
         mo.md("### Per-run detail"),
         mo.ui.table(_detail),
