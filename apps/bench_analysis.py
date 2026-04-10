@@ -9,12 +9,15 @@ def _():
     import io
     import re
     import urllib.request
+    from pathlib import Path
 
     import altair as alt
     import marimo as mo
     import pandas as pd
 
     def _read_csv(path):
+        if isinstance(path, Path):
+            return pd.read_csv(path)
         with urllib.request.urlopen(str(path)) as resp:
             return pd.read_csv(io.BytesIO(resp.read()))
 
@@ -215,10 +218,218 @@ def _(alt, datatype_dropdown, mo, reg_bench_df, reserve_radio):
 
 
 @app.cell
-def _(lf_tab, mo, reg_tab):
+def _(mo):
+    import re as _re
+    import urllib.request as _urllib_request
+    from pathlib import Path as _Path
+
+    def _read_text(path):
+        if isinstance(path, _Path):
+            return path.read_text()
+        with _urllib_request.urlopen(str(path)) as _resp:
+            return _resp.read().decode("utf-8")
+
+    def _parse_lua_table(text):
+        """Parse Lua-table-style benchmark output into a Python dict."""
+        # Normalize: strip outer braces, handle nested tables recursively
+        text = text.strip()
+        if text.startswith("{") and text.endswith("}"):
+            text = text[1:-1]
+
+        result = {}
+        i = 0
+        while i < len(text):
+            # Skip whitespace and commas
+            while i < len(text) and text[i] in " \t\n\r,":
+                i += 1
+            if i >= len(text):
+                break
+
+            # [N]=value
+            if text[i] == "[":
+                end_bracket = text.index("]", i)
+                key = text[i + 1 : end_bracket].strip()
+                # Try int key
+                try:
+                    key = int(key)
+                except ValueError:
+                    pass
+                i = end_bracket + 1
+                assert text[i] == "="
+                i += 1
+            # key=value
+            elif text[i].isalpha() or text[i] == "_":
+                eq = text.index("=", i)
+                key = text[i:eq].strip()
+                i = eq + 1
+            else:
+                break
+
+            # Parse value
+            while i < len(text) and text[i] in " \t\n\r":
+                i += 1
+
+            if text[i] == "{":
+                # Nested table - find matching brace
+                depth = 1
+                start = i
+                i += 1
+                while depth > 0:
+                    if text[i] == "{":
+                        depth += 1
+                    elif text[i] == "}":
+                        depth -= 1
+                    i += 1
+                value = _parse_lua_table(text[start:i])
+            elif text[i] == '"':
+                # String value
+                end_quote = text.index('"', i + 1)
+                value = text[i + 1 : end_quote]
+                i = end_quote + 1
+            else:
+                # Number or identifier
+                end = i
+                while end < len(text) and text[end] not in ",\n}":
+                    end += 1
+                raw = text[i:end].strip()
+                try:
+                    value = int(raw)
+                except ValueError:
+                    try:
+                        value = float(raw)
+                    except ValueError:
+                        value = raw
+                i = end
+
+            result[key] = value
+
+        return result
+
+    _bench_dir = mo.notebook_location() / "public" / "bench_results"
+
+    _rows = []
+
+    for _lf in ["0.25", "0.66"]:
+        for _bmark, _prefix, _max_run in [
+            ("fightertest", f"fightertest_lf_{_lf}_infolog_", 4),
+            ("pathfinding", f"pathfinding_lf_{_lf}_infolog_", 5),
+            ("collision", f"collision_lf_{_lf}_infolog_", 5),
+        ]:
+            for _run in range(1, _max_run + 1):
+                _fname = f"{_prefix}{_run}.txt"
+                try:
+                    _text = _read_text(_bench_dir / _fname)
+                except (FileNotFoundError, OSError):
+                    continue
+                _data = _parse_lua_table(_text)
+                _sim = _data.get("Sim", {})
+                _percentiles = _sim.get("percentiles", {})
+                _rows.append({
+                    "benchmark": _bmark,
+                    "load_factor": _lf,
+                    "run": _run,
+                    "sim_mean_ms": _sim.get("mean", 0),
+                    "sim_p99_ms": _percentiles.get(99, 0),
+                })
+
+    for _bmark, _prefix in [("fightertest_std", "fightertest_std"), ("pathfinding_std", "pathfinding_std")]:
+        for _run in range(1, 6):
+            _fname = f"{_prefix}_infolog_{_run}.txt"
+            try:
+                _text = _read_text(_bench_dir / _fname)
+            except (FileNotFoundError, OSError):
+                continue
+            _data = _parse_lua_table(_text)
+            _sim = _data.get("Sim", {})
+            _percentiles = _sim.get("percentiles", {})
+            _rows.append({
+                "benchmark": _bmark,
+                "load_factor": "std",
+                "run": _run,
+                "sim_mean_ms": _sim.get("mean", 0),
+                "sim_p99_ms": _percentiles.get(99, 0),
+            })
+
+    import pandas as _pd
+
+    sim_df = _pd.DataFrame(_rows)
+    sim_avg_df = sim_df.groupby(["benchmark", "load_factor"], as_index=False).agg(
+        sim_mean_ms=("sim_mean_ms", "mean"),
+        sim_p99_ms=("sim_p99_ms", "mean"),
+    )
+    return sim_avg_df, sim_df
+
+
+@app.cell
+def _(alt, mo, sim_avg_df, sim_df):
+    _melted = sim_avg_df.melt(
+        id_vars=["benchmark", "load_factor"],
+        value_vars=["sim_mean_ms", "sim_p99_ms"],
+        var_name="metric",
+        value_name="ms",
+    )
+    _melted["metric"] = _melted["metric"].map({
+        "sim_mean_ms": "Mean",
+        "sim_p99_ms": "99th Pct",
+    })
+
+    def _make_chart(bmarks, title, subtitle):
+        if isinstance(bmarks, str):
+            bmarks = [bmarks]
+        return (
+            alt.Chart(_melted[_melted["benchmark"].isin(bmarks)])
+            .mark_bar(opacity=0.8)
+            .encode(
+                x=alt.X("metric:N", title=None, axis=alt.Axis(labelAngle=0)),
+                y=alt.Y("ms:Q", title="Frame Time", axis=alt.Axis(labelExpr="datum.value + ' ms'")),
+                color=alt.Color("load_factor:N", title="Load Factor"),
+                xOffset="load_factor:N",
+                tooltip=["load_factor:N", "metric:N", alt.Tooltip("ms:Q", format=".2f")],
+            )
+            .properties(
+                width=300,
+                height=300,
+                title=alt.TitleParams(title, fontSize=15, subtitle=subtitle),
+            )
+        )
+
+    _chart = mo.hstack([
+        mo.ui.altair_chart(_make_chart(
+            ["fightertest", "fightertest_std"],
+            "fightertest",
+            "luarules fightertest corak armpw 650 10 2040",
+        )),
+        mo.ui.altair_chart(_make_chart(
+            ["pathfinding", "pathfinding_std"],
+            "fightertest pathfinding",
+            "luarules fightertest armcv armck 11000 1 12000",
+        )),
+        mo.ui.altair_chart(_make_chart(
+            "collision",
+            "fightertest collision",
+            "luarules fightertest corak armpw 650 10 2040",
+        )),
+    ], justify="start")
+
+    # Also show per-run detail table
+    _detail = sim_df.copy()
+    _detail.columns = ["Benchmark", "Load Factor", "Run", "Sim Mean (ms)", "Sim P99 (ms)"]
+
+    sim_tab = mo.vstack([
+        mo.md("## Sim Frame Timing"),
+        _chart,
+        mo.md("### Per-run detail"),
+        mo.ui.table(_detail),
+    ])
+    return (sim_tab,)
+
+
+@app.cell
+def _(lf_tab, mo, reg_tab, sim_tab):
     mo.ui.tabs({
         "Regular Bench": reg_tab,
         "Scaling Benchmarks": lf_tab,
+        "Sim Frame Timing": sim_tab,
     }, lazy=True)
     return
 
