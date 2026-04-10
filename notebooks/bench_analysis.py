@@ -19,7 +19,7 @@ def _():
     dfs = []
     for lf in load_factors:
         f = bench_dir / f"load_factor_{lf}.csv"
-        _df = pd.read_csv(str(f))
+        _df = pd.read_csv(str(f), compression=None)
         _df["load_factor"] = lf
         dfs.append(_df)
 
@@ -35,7 +35,7 @@ def _():
     for lf in load_factors:
         for res in reserves:
             f = bench_dir / f"regular_bench_{lf}_{res}.csv"
-            _df = pd.read_csv(str(f))
+            _df = pd.read_csv(str(f), compression=None)
             _df["load_factor"] = lf
             _df["reserve"] = res
             reg_dfs.append(_df)
