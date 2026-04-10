@@ -1,3 +1,8 @@
+# /// script
+# [tool.marimo.display]
+# theme = "system"
+# ///
+
 import marimo
 
 __generated_with = "0.23.0"
@@ -89,7 +94,13 @@ def _(lf_bench_df, mo, reg_bench_df):
         value="Absolute",
         label="Scale",
     )
-    return datatype_dropdown, lf_dropdown, lf_y_scale_radio, reserve_radio, sim_scale_radio
+    return (
+        datatype_dropdown,
+        lf_dropdown,
+        lf_y_scale_radio,
+        reserve_radio,
+        sim_scale_radio,
+    )
 
 
 @app.cell

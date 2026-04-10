@@ -1,3 +1,7 @@
+# /// script
+# [tool.marimo.display]
+# theme = "system"
+# ///
 import marimo
 
 __generated_with = "0.23.0"
