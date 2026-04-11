@@ -89,6 +89,11 @@ def _(lf_bench_df, mo, reg_bench_df):
         value="Fixed",
         label="Y-axis scaling",
     )
+    reg_y_scale_radio = mo.ui.radio(
+        options={"Fixed": "fixed", "Independent": "independent"},
+        value="Fixed",
+        label="Y-axis scaling",
+    )
     sim_scale_radio = mo.ui.radio(
         options={"Absolute": "absolute", "Relative to lf=0.66": "relative"},
         value="Absolute",
@@ -98,6 +103,7 @@ def _(lf_bench_df, mo, reg_bench_df):
         datatype_dropdown,
         lf_dropdown,
         lf_y_scale_radio,
+        reg_y_scale_radio,
         reserve_radio,
         sim_scale_radio,
     )
@@ -122,9 +128,8 @@ def _(alt, lf_bench_df, lf_dropdown, lf_y_scale_radio, mo):
     _workloads = sorted(_df["Workload"].unique())
 
     _fixed = lf_y_scale_radio.value == "fixed"
-    _y_min = _df["Mean (ns)"].min()
-    _y_max = _df["Mean (ns)"].max()
-    _global_y_scale = alt.Scale(domain=[_y_min * 0.95, _y_max * 1.05])
+    _y_scale = alt.Scale(domain=[0, _df[_df["Workload"] != "iterate"]["Mean (ns)"].max() * 1.05])
+    _y_scale_iter = alt.Scale(domain=[0, _df[_df["Workload"] == "iterate"]["Mean (ns)"].max() * 1.05])
 
     _rows = []
     for _container in _containers:
@@ -133,9 +138,10 @@ def _(alt, lf_bench_df, lf_dropdown, lf_y_scale_radio, mo):
 
         for _workload in _workloads:
             _subset = _container_data[_container_data["Workload"] == _workload]
+            _wl_scale = _y_scale_iter if _workload == "iterate" else _y_scale
             _y_enc = alt.Y("Mean (ns):Q", title="Mean (ns/op)", axis=alt.Axis(labelExpr="datum.value + ' ns'"))
             if _fixed:
-                _y_enc = _y_enc.scale(_global_y_scale)
+                _y_enc = _y_enc.scale(_wl_scale)
             _chart = (
                 alt.Chart(_subset)
                 .mark_line(point=True, strokeWidth=1.5, opacity=0.8)
@@ -159,7 +165,7 @@ def _(alt, lf_bench_df, lf_dropdown, lf_y_scale_radio, mo):
             title=alt.TitleParams(
                 f"Scaling Benchmarks (load factor = {lf_dropdown.value})",
                 fontSize=18,
-                subtitle="Examining behaviour of a varying N for each given load factor. 100,000 ops per iteration, 10 iterations per run",
+                subtitle="Examining behaviour of a varying N for each given load factor. 100,000 ops per iteration, 10 iterations per run — lower is better",
             )
         )
     )
@@ -168,7 +174,14 @@ def _(alt, lf_bench_df, lf_dropdown, lf_y_scale_radio, mo):
 
 
 @app.cell
-def _(alt, datatype_dropdown, mo, reg_bench_df, reserve_radio):
+def _(
+    alt,
+    datatype_dropdown,
+    mo,
+    reg_bench_df,
+    reg_y_scale_radio,
+    reserve_radio,
+):
     _df = reg_bench_df[
         (reg_bench_df["Container"] == datatype_dropdown.value)
         & (reg_bench_df["reserve"] == reserve_radio.value)
@@ -187,10 +200,10 @@ def _(alt, datatype_dropdown, mo, reg_bench_df, reserve_radio):
     _load_factors = sorted(_df["load_factor"].unique())
     _workloads = sorted(_df["Workload"].unique())
 
-    _non_iter = _df[_df["Workload"] != "iterate"]
-    _iter = _df[_df["Workload"] == "iterate"]
-    _y_scale = alt.Scale(domain=[0, _non_iter["Mean (ns)"].max() * 1.05])
-    _y_scale_iter = alt.Scale(domain=[0, _iter["Mean (ns)"].max() * 1.05])
+    _fixed = reg_y_scale_radio.value == "fixed"
+    _src = reg_bench_df if _fixed else _df
+    _y_scale = alt.Scale(domain=[0, _src[_src["Workload"] != "iterate"]["Mean (ns)"].max() * 1.05])
+    _y_scale_iter = alt.Scale(domain=[0, _src[_src["Workload"] == "iterate"]["Mean (ns)"].max() * 1.05])
 
     _rows = []
     for _lf in _load_factors:
@@ -200,12 +213,15 @@ def _(alt, datatype_dropdown, mo, reg_bench_df, reserve_radio):
         for _workload in _workloads:
             _subset = _lf_data[_lf_data["Workload"] == _workload]
             _wl_scale = _y_scale_iter if _workload == "iterate" else _y_scale
+            _y_enc = alt.Y("Mean (ns):Q", title="Mean (ns/op)", axis=alt.Axis(labelExpr="datum.value + ' ns'"))
+            if _fixed:
+                _y_enc = _y_enc.scale(_wl_scale)
             _chart = (
                 alt.Chart(_subset)
                 .mark_bar(opacity=0.8)
                 .encode(
                     x=alt.X("N:O", title="Size of container", axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y("Mean (ns):Q", scale=_wl_scale, title="Mean (ns/op)", axis=alt.Axis(labelExpr="datum.value + ' ns'")),
+                    y=_y_enc,
                     color=alt.Color("Impl:N", scale=_color_scale, title="Implementation"),
                     xOffset="Impl:N",
                     tooltip=["Impl:N", "N:O", "Mean (ns):Q"],
@@ -225,11 +241,11 @@ def _(alt, datatype_dropdown, mo, reg_bench_df, reserve_radio):
             title=alt.TitleParams(
                 f"Regular Benchmarks — {datatype_dropdown.value} ({_reserve_label})",
                 fontSize=18,
-                subtitle="Examining spring vs. std:: implementations of hash containers. 1,000,000 ops per iteration, 100 iterations per run",
+                subtitle="Examining spring vs. std:: implementations of hash containers. 1,000,000 ops per iteration, 100 iterations per run — lower is better",
             )
         )
     )
-    reg_tab = mo.vstack([mo.hstack([datatype_dropdown, reserve_radio], justify="start"), _chart_grid])
+    reg_tab = mo.vstack([mo.hstack([datatype_dropdown, reg_y_scale_radio, reserve_radio], justify="start"), _chart_grid])
     return (reg_tab,)
 
 
@@ -410,7 +426,7 @@ def _(alt, mo, sim_avg_df, sim_df, sim_scale_radio):
             alt.Chart(_data)
             .mark_bar(opacity=0.8)
             .encode(
-                x=alt.X("metric:N", title=None, axis=alt.Axis(labelAngle=0)),
+                x=alt.X("metric:N", title=None, sort=["Mean", "99th Pct"], axis=alt.Axis(labelAngle=0)),
                 y=_y,
                 color=alt.Color("load_factor:N", title="Load Factor"),
                 xOffset="load_factor:N",
@@ -456,6 +472,7 @@ def _(alt, mo, sim_avg_df, sim_df, sim_scale_radio):
 
     sim_tab = mo.vstack([
         mo.md("## Sim Frame Timing"),
+        mo.md("*Lower is better*"),
         sim_scale_radio,
         _chart,
         mo.md("### Per-run detail"),
@@ -467,9 +484,9 @@ def _(alt, mo, sim_avg_df, sim_df, sim_scale_radio):
 @app.cell
 def _(lf_tab, mo, reg_tab, sim_tab):
     mo.ui.tabs({
-        "Regular Bench": reg_tab,
-        "Scaling Benchmarks": lf_tab,
-        "Sim Frame Timing": sim_tab,
+        "BAR Fightertest Bench": sim_tab,
+        "Scaling N Microbench": lf_tab,
+        "Regular Microbench": reg_tab,
     }, lazy=True)
     return
 
