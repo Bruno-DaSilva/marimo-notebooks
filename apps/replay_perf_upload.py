@@ -63,6 +63,7 @@ def _(pl):
     # packet ids we act on; everything else is skipped by length
     PAUSE, STARTPLAYING, INTERNAL_SPEED, GAMEOVER, PLAYERINFO, LUAMSG = (
         13, 4, 20, 30, 38, 50)
+    CREATE_NEWPLAYER = 75  # mid-game joiner (usually a spectator)
 
     _PLAYERINFO = struct.Struct("<Bfi")   # playerNum u8, cpuUsage f32, ping i32
     _F32 = struct.Struct("<f")
@@ -261,7 +262,7 @@ def _(pl):
                 "country": val.get("countrycode"),
                 "skill": val.get("skill"),
             })
-        return map_name, game_version, players
+        return map_name, game_version, players, teams
 
     def parse_demo_bytes(raw):
         sdf = gzip.decompress(raw)
@@ -270,13 +271,15 @@ def _(pl):
         r.off = h["headerSize"]
         script_text = r.read(h["scriptSize"]).decode("utf-8", "replace")
         stream = r.read(h["demoStreamSize"])
-        map_name, game_version, players = _build_players(_parse_tdf(script_text))
+        map_name, game_version, players, teams = _build_players(
+            _parse_tdf(script_text))
 
         # columnar accumulators — avoid per-row tuple/object overhead
         c_pid, c_t, c_sim, c_q, c_isp, c_cpu, c_ping = [], [], [], [], [], [], []
         f_pid, f_t, f_fps = [], [], []
         ft_rows = []
         pause_t = []  # game time of each pause-start (NETMSG_PAUSE, bPaused=1)
+        joiners = []  # players not in the setup script (CREATE_NEWPLAYER)
         hardware = {}
         last_fps = {}
         internal_speed = 1.0
@@ -316,6 +319,19 @@ def _(pl):
             elif pid == PAUSE:  # [playerNum u8, bPaused u8]; record pause starts
                 if buf[off + 2] == 1:
                     pause_t.append(t)
+            elif pid == CREATE_NEWPLAYER:
+                # [size u16, playerNum u8, spectator u8, teamNum u8, name cstr]
+                # Players who join after the game started are absent from the
+                # setup script but still emit PLAYERINFO/FPS/frame-time
+                # telemetry, so they need a players row or every chart drops
+                # them (they join as spectators in practice).
+                joiners.append({
+                    "playerNum": buf[off + 3],
+                    "spectator": buf[off + 4] == 1,
+                    "teamId": buf[off + 5],
+                    "name": buf[off + 6:off + length].split(b"\x00")[0]
+                              .decode("utf-8", "replace"),
+                })
             elif pid == STARTPLAYING:
                 if game_start is None and _I32.unpack_from(buf, off + 1)[0] == 0:
                     game_start = mod_game_time
@@ -352,6 +368,24 @@ def _(pl):
                             if m:
                                 hardware[pn] = m.groupdict()
             off += length
+
+        _known = {p["playerNum"] for p in players}
+        for j in joiners:
+            if j["playerNum"] in _known:
+                continue  # rejoin of a scripted player, not a new one
+            _known.add(j["playerNum"])
+            tm = {} if j["spectator"] else teams.get(j["teamId"], {})
+            players.append({
+                "playerNum": j["playerNum"],
+                "name": j["name"] or f"player{j['playerNum']}",
+                "teamId": None if j["spectator"] else j["teamId"],
+                "allyTeamId": tm.get("allyTeamId"),
+                "is_spectator": j["spectator"],
+                "faction": tm.get("faction"),
+                "country": None,
+                "skill": None,
+            })
+        players.sort(key=lambda p: p["playerNum"])
 
         if duration_s is None:
             # No GAMEOVER: prefer wallclockTime (demo-parser.ts), but locally
@@ -573,7 +607,7 @@ def _(mo, players_df):
     name_to_pid = {
         row["name"]: int(row["playerNum"])
         for row in players_df.sort(
-            ["allyTeamId", "teamId", "playerNum"]
+            ["allyTeamId", "teamId", "playerNum"], nulls_last=True
         ).iter_rows(named=True)
     }
     player_selector = mo.ui.multiselect(
@@ -606,7 +640,9 @@ def _(players_df):
     # together with the first player on the first team leading. Makes it easy
     # to read who's allied with whom straight off the legend.
     _names = (
-        players_df.sort(["allyTeamId", "teamId", "playerNum"])["name"].to_list()
+        players_df.sort(
+            ["allyTeamId", "teamId", "playerNum"], nulls_last=True
+        )["name"].to_list()
     )
     player_colors = {n: _palette[i % len(_palette)] for i, n in enumerate(_names)}
     return (player_colors,)
