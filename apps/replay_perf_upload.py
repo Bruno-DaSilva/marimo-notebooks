@@ -23,8 +23,8 @@ def _(mo):
 
     Drop a Beyond All Reason demo below. It's parsed **entirely in your
     browser** (no upload to any server) to show per-player sim-frame timing,
-    render FPS, server speed, a whole-game summary, and the hardware each
-    player reported.
+    render FPS, reported CPU load, server speed, a whole-game summary, and the
+    hardware each player reported.
     """)
     return
 
@@ -720,7 +720,10 @@ def _(alt, frametime_df, mo, pause_df, perf_df, pl):
         scrubber = _scrubber(perf_df, "simFrameMs", _label)
     else:
         scrubber = _scrubber(frametime_df, "avgSim", _label)
-    return pause_marks, scrubber, zoom_domain
+    # The CPU tab gets its own strip (a marimo UI element belongs to one spot in
+    # the layout), so its zoom is independent of the Performance tab's.
+    cpu_scrubber = _scrubber(perf_df, "cpuUsage", _label)
+    return cpu_scrubber, pause_marks, scrubber, zoom_domain
 
 
 @app.cell
@@ -992,6 +995,106 @@ def _(
 @app.cell
 def _(
     alt,
+    cpu_scrubber,
+    mo,
+    pause_marks,
+    perf_df,
+    pl,
+    player_colors,
+    player_selector,
+    players_df,
+    smoothing,
+    zoom_domain,
+):
+    # --- CPU load tab ------------------------------------------------------
+    # Raw `cpuUsage` straight off every PLAYERINFO packet: the share of its
+    # sim-frame budget the client reported burning, 0–1, drawn here as a
+    # percentage. This is the input the approximated sim-frame timing is derived
+    # from, so it's the one signal available for every demo (no dependency on
+    # the #ft broadcasts). 100% is the engine's saturation point — at (or above)
+    # it the derivation gives up, which is why those samples vanish from the
+    # approximated sim chart but are still visible here.
+    _dom = zoom_domain(cpu_scrubber)
+    _xscale = alt.Scale(domain=_dom) if _dom else alt.Undefined
+    _sel = list(player_selector.value)
+    _win = max(2, int(smoothing.value) or 2)
+
+    _clean = perf_df.filter(
+        pl.col("cpuUsage").is_not_null()
+        & pl.col("cpuUsage").is_finite()
+        # Same validity window the sim derivation uses: outside [0, 1] the
+        # engine's number is junk and would wreck the axis.
+        & pl.col("cpuUsage").is_between(0.0, 1.0)
+        & pl.col("playerNum").is_in(_sel)
+    )
+    if _dom:
+        _clean = _clean.filter(pl.col("t").is_between(_dom[0], _dom[1]))
+    _plot = (
+        (
+            _clean.with_columns(
+                cpu=pl.col("cpuUsage") * 100,
+                t_bin=(pl.col("t") // _win * _win),
+            )
+            .group_by(["playerNum", "t_bin"])
+            .agg(pl.col("cpu").mean())
+            .rename({"t_bin": "t"})
+            .sort(["playerNum", "t"])
+            .join(players_df.select(["playerNum", "name"]), on="playerNum")
+        )
+        if not _clean.is_empty()
+        else pl.DataFrame()
+    )
+
+    _cpu_line = (
+        alt.Chart(_plot)
+        .mark_line(opacity=0.75, strokeWidth=1.2, clip=True)
+        .encode(
+            x=alt.X("t:Q", title="Game time (sim s)", scale=_xscale),
+            y=alt.Y(
+                "cpu:Q",
+                title="Reported CPU load (%)",
+                # Fixed full-scale axis: the distance to 100% is the point, and
+                # it keeps the chart comparable between replays.
+                scale=alt.Scale(domain=[0, 100]),
+            ),
+            color=alt.Color(
+                "name:N",
+                scale=alt.Scale(
+                    domain=list(player_colors.keys()),
+                    range=list(player_colors.values()),
+                ),
+                title="Player",
+                legend=alt.Legend(orient="right", labelLimit=140),
+            ),
+            tooltip=[
+                alt.Tooltip("name:N", title="Player"),
+                alt.Tooltip("t:Q", format=".0f", title="t (s)"),
+                alt.Tooltip("cpu:Q", format=".1f", title="CPU %"),
+            ],
+        )
+    )
+    _rule = pause_marks(_dom, _xscale)
+    cpu_chart = mo.ui.altair_chart(
+        (_cpu_line if _rule is None else alt.layer(_cpu_line, _rule)).properties(
+            height=max(280, 14 * len(_sel) + 60),
+            width="container",
+            padding={"left": 5, "top": 5, "bottom": 5, "right": 50},
+            title=alt.TitleParams(
+                "Reported CPU load per player",
+                subtitle="Lower is better — 100% means the client saturated its "
+                         "sim-frame budget",
+                subtitleColor="#888",
+            ),
+        ),
+        chart_selection=False,
+        legend_selection=False,
+    )
+    return (cpu_chart,)
+
+
+@app.cell
+def _(
+    alt,
     fps_df,
     frametime_df,
     mo,
@@ -1154,6 +1257,8 @@ def _(hardware_df, mo):
 
 @app.cell
 def _(
+    cpu_chart,
+    cpu_scrubber,
     draw_view,
     hardware_view,
     health_chart,
@@ -1168,6 +1273,7 @@ def _(
             "Performance": mo.vstack(
                 [scrubber, perf_view, health_chart]
             ),
+            "CPU load": mo.vstack([cpu_scrubber, cpu_chart]),
             "Summary": mo.vstack([summary_table, sim_bar, draw_view]),
             "Hardware": hardware_view,
         },
